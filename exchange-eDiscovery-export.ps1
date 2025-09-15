@@ -92,6 +92,7 @@
 .NOTES
     - Requires Microsoft Graph PowerShell module installed (Install-Module Microsoft.Graph)
     - Requires MSAL.PS module for Microsoft's official download method
+    - Requires Exchange Online Module
     - App registration must have eDiscovery.ReadWrite.All permission with admin consent granted
     - App registration must have MicrosoftPurviewEDiscovery API permissions for downloads
 
