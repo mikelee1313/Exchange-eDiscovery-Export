@@ -29,7 +29,7 @@
   Install-Module MSAL.PS
   ```
 
-  - **Exchange Online PowerShell module**  
+- **Exchange Online PowerShell module**  
   Install via:  
   ```powershell
   Install-Module -Name ExchangeOnlineManagement
