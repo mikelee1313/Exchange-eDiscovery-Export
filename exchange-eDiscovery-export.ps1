@@ -1,31 +1,115 @@
-# Exchange Calendar Export Script for eDiscovery
-# 
-# This script exports calendar, contacts, and/or tasks from Exchange Online mailboxes
-# using Microsoft Graph API directly without PowerShell modules. It uses REST API calls
-# for all operations related to eDiscovery cases and searches.
-#
-# Usage examples:
-#   .\exchange-eDiscovery-export.ps1 -EmailAddress user@domain.com
-#   .\exchange-eDiscovery-export.ps1 -EmailAddress user@domain.com -ContentType calendar
-#   .\exchange-eDiscovery-export.ps1 -ClearTokenCache
-#   .\exchange-eDiscovery-export.ps1 -Version prod  # Use v1.0 endpoints for all API calls
-#   .\exchange-eDiscovery-export.ps1 -Version beta  # Use beta endpoints for all API calls
-#   .\exchange-eDiscovery-export.ps1 -DebugOutput   # Enable verbose debug output
-#   .\exchange-eDiscovery-export.ps1             # Clean output (default)
-#
-# Notes:
-#   - The Version parameter controls which Microsoft Graph API endpoint version to use
-#   - When Version=prod is specified, the script will use v1.0 endpoints for all API calls
-#   - When Version=beta is specified, the script will use beta endpoints for all API calls
-#
-# Requirements:
-#   - Microsoft Graph PowerShell module installed (Install-Module Microsoft.Graph)
-#   - MSAL.PS module (for official Microsoft download method)
-#   - App registration with eDiscovery.ReadWrite.All permission with admin consent granted
-#   - App registration with MicrosoftPurviewEDiscovery API permissions for downloads
-# https://techcommunity.microsoft.com/blog/microsoft-security-blog/getting-started-with-the-ediscovery-apis/4407597
-#
-# User and authentication information
+<#
+.SYNOPSIS
+    Exports calendar, contacts, and tasks from Exchange Online mailboxes using Microsoft Graph API.
+
+.DESCRIPTION
+    This script exports calendar items, contacts, and/or tasks from Exchange Online mailboxes
+    using Microsoft Graph API directly without requiring Exchange Online PowerShell modules.
+    It leverages eDiscovery capabilities to perform the exports through REST API calls.
+
+.PARAMETER ClearTokenCache
+    Clears all Microsoft Graph authentication tokens and cached states.
+
+.PARAMETER VerboseTokenClearing
+    Shows detailed information when clearing authentication tokens.
+
+.PARAMETER EmailAddress
+    The email address of the mailbox to export from.
+    Default: "NestorW@M365x61250205.OnMicrosoft.com"
+
+.PARAMETER AppID
+    The application (client) ID of the app registration in Azure AD.
+    Default: "5baa1427-1e90-4501-831d-a8e67465f0d9"
+
+.PARAMETER TenantId
+    The Azure AD tenant ID.
+    Default: "85612ccb-4c28-4a34-88df-a538cc139a51"
+
+.PARAMETER AuthMode
+    Authentication mode to use when connecting to Microsoft Graph.
+    Valid values: "Cert", "Secret"
+    Default: "cert"
+
+.PARAMETER certlocation
+    Location of the certificate to use for authentication.
+    Valid values: "Cert:\LocalMachine\My\", "Cert:\My\"
+    Default: "Cert:\LocalMachine\My\"
+
+.PARAMETER CertificateThumbprint
+    The thumbprint of the certificate to use for authentication.
+    Default: "B696FDCFE1453F3FBC6031F54DE988DA0ED905A9"
+
+.PARAMETER ClientSecret
+    The client secret to use when AuthMode is "Secret".
+
+.PARAMETER Version
+    The Microsoft Graph API version to use.
+    Valid values: "prod" (v1.0), "beta"
+    Default: "beta"
+
+.PARAMETER ContentType
+    The type of content to export.
+    Valid values: "all", "calendar", "contacts", "tasks"
+    Default: "all"
+
+.PARAMETER Operation
+    The operation to perform.
+    Valid values: "menu", "create", "export", "download"
+    Default: "menu"
+
+.PARAMETER CaseId
+    The ID of an existing eDiscovery case to use.
+
+.PARAMETER SearchId
+    The ID of an existing eDiscovery search to use.
+
+.PARAMETER ExportId
+    The ID of an existing export to download.
+
+.PARAMETER DownloadPath
+    The path where exported files should be saved.
+    Default: "C:\temp"
+
+.PARAMETER DebugOutput
+    Enables verbose debug output during script execution.
+
+.EXAMPLE
+    .\exchange-cal-export.ps1 -EmailAddress user@domain.com
+    Exports all content types for the specified user.
+
+.EXAMPLE
+    .\exchange-cal-export.ps1 -EmailAddress user@domain.com -ContentType calendar
+    Exports only calendar items for the specified user.
+
+.EXAMPLE
+    .\exchange-cal-export.ps1 -ClearTokenCache
+    Clears all authentication tokens and exits.
+
+.EXAMPLE
+    .\exchange-cal-export.ps1 -Version prod
+    Uses v1.0 endpoints for all API calls.
+
+.NOTES
+    - Requires Microsoft Graph PowerShell module installed (Install-Module Microsoft.Graph)
+    - Requires MSAL.PS module for Microsoft's official download method
+    - App registration must have eDiscovery.ReadWrite.All permission with admin consent granted
+    - App registration must have MicrosoftPurviewEDiscovery API permissions for downloads
+
+Author: Mike Lee | Dempsey Dunkin | Ranjit Sharma
+Date: 9/15/2025
+
+
+.REQUIREMENTS
+
+ - Microsoft Graph PowerShell module installed (Install-Module Microsoft.Graph)
+ - MSAL.PS module (for official Microsoft download method)
+ - App registration with eDiscovery.ReadWrite.All permission with admin consent granted
+ - App registration with MicrosoftPurviewEDiscovery API permissions for downloads
+https://techcommunity.microsoft.com/blog/microsoft-security-blog/getting-started-with-the-ediscovery-apis/4407597
+https://learn.microsoft.com/en-us/graph/security-ediscovery-appauthsetup
+
+#>
+
 param (
     [Parameter(Mandatory = $false)]
     [switch]$ClearTokenCache,
