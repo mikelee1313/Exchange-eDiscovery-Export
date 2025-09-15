@@ -28,6 +28,13 @@
   ```powershell
   Install-Module MSAL.PS
   ```
+
+  - **Exchange Online PowerShell module**  
+  Install via:  
+  ```powershell
+  Install-Module -Name ExchangeOnlineManagement
+  ```
+  
 - **App Registration in Azure AD** with the following permissions:
   - `eDiscovery.ReadWrite.All` (Application permission, admin consent granted)
   - `MicrosoftPurviewEDiscovery` API permissions for downloads
