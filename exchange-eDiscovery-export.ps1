@@ -97,7 +97,7 @@
     - App registration must have MicrosoftPurviewEDiscovery API permissions for downloads
 
 Author: Mike Lee | Dempsey Dunkin | Ranjit Sharma
-Date: 9/15/2025
+Date: 9/18/2025
 
 
 .REQUIREMENTS
@@ -240,13 +240,26 @@ if ($ClearTokenCache) {
 # Import required modules
 Write-Host "Importing Microsoft Graph modules..." -ForegroundColor Yellow
 try {
-    Import-Module Microsoft.Graph.Authentication -Force -ErrorAction Stop
-    Import-Module Microsoft.Graph.Security -Force -ErrorAction Stop
-    Write-Host "Microsoft Graph modules imported successfully." -ForegroundColor Green
+    # Remove any existing Graph modules to prevent version conflicts
+    Get-Module Microsoft.Graph* | Remove-Module -Force -ErrorAction SilentlyContinue
+    
+    # Try to import specific version first
+    try {
+        Import-Module Microsoft.Graph.Authentication -RequiredVersion 2.30.0 -Force -ErrorAction Stop
+        Import-Module Microsoft.Graph.Security -RequiredVersion 2.30.0 -Force -ErrorAction Stop
+        Write-Host "Microsoft Graph modules v2.30.0 imported successfully." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Could not load v2.30.0, trying latest available version..." -ForegroundColor Yellow
+        Import-Module Microsoft.Graph.Authentication -Force -ErrorAction Stop
+        Import-Module Microsoft.Graph.Security -Force -ErrorAction Stop
+        Write-Host "Microsoft Graph modules imported successfully." -ForegroundColor Green
+    }
 }
 catch {
     Write-Host "Error importing Microsoft Graph modules: $_" -ForegroundColor Red
-    Write-Host "Please install Microsoft Graph PowerShell SDK: Install-Module Microsoft.Graph -Scope CurrentUser" -ForegroundColor Yellow
+    Write-Host "Please ensure Microsoft Graph PowerShell SDK is installed:" -ForegroundColor Yellow
+    Write-Host "Install-Module Microsoft.Graph -Scope CurrentUser -Force" -ForegroundColor Yellow
     exit 1
 }
 
@@ -1468,439 +1481,9 @@ Function Save-M365ComplianceFile {
     }
 }
 
-# Function to download files from eDiscovery proxy service specifically
-# Based on the article: https://michev.info/blog/post/5806/using-the-graph-api-to-export-ediscovery-premium-datasets
-Function Get-eDiscoveryProxyFile {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$DownloadUrl,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$OutputFilePath,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$AuthToken = $null
-    )
-    
-    Write-Host "Starting specialized eDiscovery Proxy download..." -ForegroundColor Yellow
-    
-    # Make sure the directory exists
-    $outputDir = Split-Path -Path $OutputFilePath -Parent
-    if (-not (Test-Path -Path $outputDir)) {
-        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-    }
-    
-    # Delete the file if it already exists to start fresh
-    if (Test-Path -Path $OutputFilePath) {
-        Remove-Item -Path $OutputFilePath -Force
-    }
-    
-    # If no token provided, try to get one from the Graph context
-    if (-not $AuthToken) {
-        try {
-            $graphContext = Get-MgContext
-            if ($graphContext -and $graphContext.AccessToken) {
-                $AuthToken = $graphContext.AccessToken
-                Write-Host "Retrieved authentication token from Graph context" -ForegroundColor Green
-            }
-            else {
-                Write-Host "No Graph context found. Please connect to Microsoft Graph first." -ForegroundColor Yellow
-                return $false
-            }
-        }
-        catch {
-            Write-Host "Error retrieving Graph token: $_" -ForegroundColor Red
-            return $false
-        }
-    }
-    
-    # Create headers with the authentication token and special header for eDiscovery proxy service
-    $headers = @{
-        'Content-Type'        = 'application/json'
-        'Authorization'       = "Bearer $AuthToken"
-        'X-AllowWithAADToken' = "true"
-        'Accept'              = 'application/octet-stream'
-        'User-Agent'          = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
-    }
-    
-    # Disable progress bar for better performance
-    $ProgressPreference = 'SilentlyContinue'
-    
-    $downloadSuccess = $false
-    
-    try {
-        Write-Host "Downloading file with eDiscovery proxy specialized approach..." -ForegroundColor Yellow
-        
-        # First attempt: Use Invoke-WebRequest with X-AllowWithAADToken
-        try {
-            Invoke-WebRequest -Uri $DownloadUrl -Headers $headers -OutFile $OutputFilePath -Method Get -UseBasicParsing
-            
-            if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                $fileSize = (Get-Item -Path $OutputFilePath).Length
-                
-                # Check if the file is HTML or actual binary content
-                $fileStream = [System.IO.File]::OpenRead($OutputFilePath)
-                $buffer = New-Object byte[] 1024
-                $bytesRead = $fileStream.Read($buffer, 0, 1024)
-                $fileStream.Close()
-                
-                $fileText = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $bytesRead)
-                
-                if ($fileText -match '<!DOCTYPE html' -or $fileText -match '<html') {
-                    Write-Host "Download returned HTML content instead of binary file. Trying second approach..." -ForegroundColor Yellow
-                    
-                    # If the file is HTML, try second approach (use WebClient)
-                    try {
-                        $headers.Remove('X-AllowWithAADToken')
-                        $headers['Accept'] = 'application/octet-stream, application/json, */*'
-                        
-                        # Create a WebClient for binary download
-                        $webClient = New-Object System.Net.WebClient
-                        
-                        # Add headers to WebClient
-                        foreach ($key in $headers.Keys) {
-                            $webClient.Headers.Add($key, $headers[$key])
-                        }
-                        
-                        # Download directly to file
-                        $webClient.DownloadFile($DownloadUrl, $OutputFilePath)
-                        
-                        if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                            $fileSize = (Get-Item -Path $OutputFilePath).Length
-                            Write-Host "File downloaded successfully with WebClient - size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                            $downloadSuccess = $true
-                        }
-                        else {
-                            throw "WebClient download produced empty file"
-                        }
-                    }
-                    catch {
-                        Write-Host "WebClient approach failed: $_" -ForegroundColor Yellow
-                        
-                        # Try curl as last resort
-                        try {
-                            Write-Host "Trying curl approach..." -ForegroundColor Yellow
-                            
-                            # Format headers for curl
-                            $curlHeaders = @()
-                            foreach ($key in $headers.Keys) {
-                                $curlHeaders += "-H `"$key`: $($headers[$key])`""
-                            }
-                            
-                            $curlCommand = "curl.exe -L -o `"$OutputFilePath`" $($curlHeaders -join ' ') `"$DownloadUrl`""
-                            Write-Host "Executing: $curlCommand" -ForegroundColor Yellow
-                            
-                            Invoke-Expression $curlCommand
-                            
-                            if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                                $fileSize = (Get-Item -Path $OutputFilePath).Length
-                                Write-Host "File downloaded successfully with curl - size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                                $downloadSuccess = $true
-                            }
-                            else {
-                                throw "Curl download produced empty file"
-                            }
-                        }
-                        catch {
-                            Write-Host "Curl approach failed: $_" -ForegroundColor Red
-                        }
-                    }
-                }
-                else {
-                    # Not HTML, so it's likely the correct binary content
-                    Write-Host "File downloaded successfully with size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                    $downloadSuccess = $true
-                }
-            }
-            else {
-                throw "Download produced empty file"
-            }
-        }
-        catch {
-            Write-Host "First download attempt failed: $_" -ForegroundColor Yellow
-            
-            # Try alternative approach without X-AllowWithAADToken
-            try {
-                $headers.Remove('X-AllowWithAADToken')
-                
-                Invoke-WebRequest -Uri $DownloadUrl -Headers $headers -OutFile $OutputFilePath -Method Get -UseBasicParsing
-                
-                if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                    $fileSize = (Get-Item -Path $OutputFilePath).Length
-                    Write-Host "File downloaded successfully (second attempt) with size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                    $downloadSuccess = $true
-                }
-                else {
-                    throw "Second download attempt produced empty file"
-                }
-            }
-            catch {
-                Write-Host "Second download attempt failed: $_" -ForegroundColor Red
-            }
-        }
-    }
-    catch {
-        Write-Host "Error in eDiscovery proxy specialized download: $_" -ForegroundColor Red
-        $downloadSuccess = $false
-    }
-    finally {
-        $ProgressPreference = 'Continue'  # Reset progress preference
-    }
-    
-    return $downloadSuccess
-}
 
-# Function to handle Microsoft 365 Purview/Compliance URLs specifically
-Function ConvertTo-M365PurviewDownload {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$DownloadUrl,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$OutputFilePath
-    )
-    
-    # Skip downloads only during actual script initialization, not when user explicitly requests downloads
-    if ($global:IsScriptInitializing -or
-        [string]::IsNullOrEmpty($DownloadUrl) -or [string]::IsNullOrEmpty($OutputFilePath)) {
-        Write-Host "[GUARD] Skipping purview download - missing required parameters or during initialization" -ForegroundColor Yellow
-        Write-Host "IsScriptInitializing: $($global:IsScriptInitializing)" -ForegroundColor Gray 
-        Write-Host "DownloadUrl: $(if([string]::IsNullOrEmpty($DownloadUrl)){'<empty>'}else{'<set>'})" -ForegroundColor Gray
-        Write-Host "OutputFilePath: $(if([string]::IsNullOrEmpty($OutputFilePath)){'<empty>'}else{'<set>'})" -ForegroundColor Gray
-        return $false
-    }
-    
-    $downloadSuccess = $false
-    $retryCount = 0
-    $MaxRetriesLocal = 3
-    $RetryDelaySecondsLocal = 2
-    
-    while (-not $downloadSuccess -and $retryCount -lt $MaxRetriesLocal) {
-        try {
-            if ($retryCount -gt 0) {
-                Write-Host "Retry attempt $retryCount of $MaxRetriesLocal..." -ForegroundColor Yellow
-                Start-Sleep -Seconds $RetryDelaySecondsLocal
-            }
-            
-            Write-Host "Creating web session with authentication support..." -ForegroundColor Yellow
-            
-            # Create a session to maintain cookies across requests
-            $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-            
-            # Add cookies container to store authentication cookies
-            $session.Cookies = New-Object System.Net.CookieContainer
-            
-            # Set modern user agent to avoid authentication issues
-            $userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36 Edg/96.0.1054.62"
-            
-            # Set headers appropriate for binary download from Microsoft services
-            $headers = @{
-                "Accept"          = "application/octet-stream, application/json, */*"
-                "User-Agent"      = $userAgent
-                "Sec-Fetch-Site"  = "same-origin"
-                "Sec-Fetch-Mode"  = "navigate"
-                "Sec-Fetch-Dest"  = "document"
-                "Accept-Encoding" = "gzip, deflate, br"
-                "Accept-Language" = "en-US,en;q=0.9"
-            }
-            
-            # If we have an auth token, use it (for Graph API authenticated URLs)
-            if ($AuthToken) {
-                Write-Host "Using provided authentication token for download..." -ForegroundColor Green
-                $headers["Authorization"] = "Bearer $AuthToken"
-            }
-            else {
-                # Try to get auth token from Graph context if available
-                try {
-                    $graphContext = Get-MgContext
-                    if ($graphContext -and $graphContext.TokenCache -and $graphContext.TokenCache.AccessToken) {
-                        $AuthToken = $graphContext.TokenCache.AccessToken
-                        Write-Host "Retrieved auth token from Graph context" -ForegroundColor Green
-                        $headers["Authorization"] = "Bearer $AuthToken"
-                    }
-                }
-                catch {
-                    Write-Host "Could not retrieve Graph auth token: $_" -ForegroundColor Yellow
-                    Write-Host "Continuing with cookie-based authentication..." -ForegroundColor Yellow
-                }
-            }
-            
-            # Disable progress bar for better performance
-            $ProgressPreference = 'SilentlyContinue'
-            
-            # First make a request to the URL to follow redirects and establish authentication
-            Write-Host "Step 1: Initial request to follow redirects and establish auth..." -ForegroundColor Yellow
-            try {
-                $initialResponse = Invoke-WebRequest -Uri $DownloadUrl -WebSession $session -Headers $headers -Method Get -UseBasicParsing -MaximumRedirection 10
-                Write-Host "Initial request successful with status: $($initialResponse.StatusCode)" -ForegroundColor Green
-                
-                # Check if we received HTML content instead of expected binary
-                if ($initialResponse.Content.Length -lt 50000 -and ($initialResponse.Content -match '<!DOCTYPE html' -or $initialResponse.Content -match '<html')) {
-                    Write-Host "WARNING: Initial response appears to be HTML instead of binary data!" -ForegroundColor Yellow
-                    
-                    # Check if it's a login page
-                    if ($initialResponse.Content -match 'login' -or $initialResponse.Content -match 'sign in' -or $initialResponse.Content -match 'authentication') {
-                        Write-Host "Detected login/authentication page! Session appears to be unauthenticated." -ForegroundColor Red
-                        # We'll still continue to try other methods
-                    }
-                }
-            }
-            catch [System.Net.WebException] {
-                $respStream = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($respStream)
-                $respBody = $reader.ReadToEnd()
-                Write-Host "Initial request returned error: $respBody" -ForegroundColor Yellow
-                
-                # Still continue as we may have established cookies needed for download
-                Write-Host "Continuing despite error as authentication may still be established..." -ForegroundColor Yellow
-            }
-            
-            # Now try to download the file directly
-            Write-Host "Step 2: Downloading file using established session..." -ForegroundColor Yellow
-            try {
-                # Modify headers for direct file download
-                $headers["Accept"] = "application/octet-stream"
-                
-                # Stream the response directly to a file
-                Invoke-WebRequest -Uri $DownloadUrl -WebSession $session -Headers $headers -OutFile $OutputFilePath -Method Get -UseBasicParsing -MaximumRedirection 10
-                
-                # Check if file was created with content
-                if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                    $fileSize = (Get-Item -Path $OutputFilePath).Length
-                    
-                    # Check if the file contains HTML (login page) instead of binary data
-                    if (Test-IsHtmlContent -FilePath $OutputFilePath) {
-                        Write-Host "Downloaded file appears to be HTML (possibly login page) instead of expected binary file!" -ForegroundColor Red
-                        Write-Host "Will try alternative download methods..." -ForegroundColor Yellow
-                        throw "Downloaded content is HTML instead of expected binary file"
-                    }
-                    
-                    Write-Host "File downloaded successfully with size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                    $downloadSuccess = $true
-                }
-                else {
-                    Write-Host "File appears empty or wasn't created properly" -ForegroundColor Yellow
-                    throw "Downloaded file is empty or wasn't created"
-                }
-            }
-            catch {
-                Write-Host "Direct download failed: $_" -ForegroundColor Yellow
-                Write-Host "Trying alternative download method..." -ForegroundColor Yellow
-                
-                # Try with System.Net.WebClient for more direct binary handling
-                try {
-                    $webClient = New-Object System.Net.WebClient
-                    
-                    # Transfer cookies from the session to WebClient
-                    $webClient.Headers.Add([System.Net.HttpRequestHeader]::Cookie, $session.Cookies.GetCookieHeader([System.Uri]$DownloadUrl))
-                    
-                    # Add the headers
-                    foreach ($key in $headers.Keys) {
-                        $webClient.Headers.Add($key, $headers[$key])
-                    }
-                    
-                    # Download the file directly to disk
-                    $webClient.DownloadFile($DownloadUrl, $OutputFilePath)
-                    
-                    # Check if file was created with content
-                    if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                        $fileSize = (Get-Item -Path $OutputFilePath).Length
-                        
-                        # Check if the file contains HTML (login page) instead of binary data
-                        if (Test-IsHtmlContent -FilePath $OutputFilePath) {
-                            Write-Host "Downloaded file appears to be HTML (possibly login page) instead of expected binary file!" -ForegroundColor Red
-                            Write-Host "Will try another download method..." -ForegroundColor Yellow
-                            throw "Downloaded content is HTML instead of expected binary file"
-                        }
-                        
-                        Write-Host "File downloaded successfully with WebClient - size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                        $downloadSuccess = $true
-                    }
-                    else {
-                        Write-Host "File appears empty or wasn't created properly with WebClient" -ForegroundColor Yellow
-                        throw "Downloaded file is empty or wasn't created"
-                    }
-                }
-                catch {
-                    Write-Host "WebClient download failed: $_" -ForegroundColor Yellow
-                    Write-Host "Trying direct command-line approach (curl)..." -ForegroundColor Yellow
-                    
-                    # Try curl as a last resort
-                    try {
-                        # Format cookies for curl
-                        $cookieString = ""
-                        foreach ($cookie in $session.Cookies.GetCookies([System.Uri]$DownloadUrl)) {
-                            $cookieString += "$($cookie.Name)=$($cookie.Value); "
-                        }
-                        
-                        # Use curl.exe with the session cookies
-                        $curlParams = @(
-                            '-L',                      # Follow redirects
-                            '-o', "`"$OutputFilePath`"", # Output file
-                            '-H', "`"User-Agent: $userAgent`"",
-                            '-H', "`"Accept: application/octet-stream`""
-                        )
-                        
-                        if ($cookieString) {
-                            $curlParams += @('-H', "`"Cookie: $cookieString`"")
-                        }
-                        
-                        # Add auth token if available
-                        if ($headers.ContainsKey("Authorization")) {
-                            $curlParams += @('-H', "`"Authorization: $($headers["Authorization"])`"")
-                        }
-                        
-                        $curlParams += "`"$DownloadUrl`""
-                        
-                        # Execute curl command
-                        $curlCommand = "curl.exe $($curlParams -join ' ')"
-                        Write-Host "Executing: $curlCommand" -ForegroundColor Yellow
-                        Invoke-Expression $curlCommand
-                        
-                        # Check if file was created with content
-                        if ((Test-Path -Path $OutputFilePath) -and ((Get-Item -Path $OutputFilePath).Length -gt 0)) {
-                            $fileSize = (Get-Item -Path $OutputFilePath).Length
-                            
-                            # Check if the file contains HTML (login page) instead of binary data
-                            if (Test-IsHtmlContent -FilePath $OutputFilePath) {
-                                Write-Host "Downloaded file appears to be HTML (possibly login page) instead of expected binary file!" -ForegroundColor Red
-                                throw "Downloaded content is HTML instead of expected binary file"
-                            }
-                            
-                            Write-Host "File downloaded successfully with curl - size: $([math]::Round($fileSize / 1KB, 2)) KB" -ForegroundColor Green
-                            $downloadSuccess = $true
-                        }
-                        else {
-                            Write-Host "File appears empty or wasn't created properly with curl" -ForegroundColor Yellow
-                            throw "Downloaded file is empty or wasn't created"
-                        }
-                    }
-                    catch {
-                        Write-Host "curl download failed: $_" -ForegroundColor Red
-                        Write-Host "All download methods failed for this attempt" -ForegroundColor Red
-                    }
-                }
-            }
-        }
-        catch {
-            Write-Host "Error during download attempt $retryCount`: $($_)" -ForegroundColor Red
-        }
-        finally {
-            $ProgressPreference = 'Continue'  # Reset preference
-        }
-        
-        $retryCount++
-    }
-    
-    if ($downloadSuccess) {
-        Write-Host "Download completed successfully after $retryCount attempt(s)" -ForegroundColor Green
-        return $true
-    }
-    else {
-        Write-Host "Download failed after $MaxRetriesLocal attempts" -ForegroundColor Red
-        return $false
-    }
-}
+
+
 
 # All duplicate function code has been removed
 
@@ -2235,296 +1818,110 @@ Function Save-ExportResults {
                 Write-LogEntry -LogName $logPath -LogEntryText "Downloading export to: $outputFilePath" -LogLevel "INFO"
                 Write-Host "Downloading export to: $outputFilePath" -ForegroundColor Yellow
                 
-                # Download the file
+                # Download the file using Save-M365ComplianceFile
                 try {
-                    # Check the URL patterns to determine the right download method
-                    $isPurviewUrl = $downloadUrl -like "*purview*" -or 
-                    $downloadUrl -like "*purviewcases*" -or
-                    $downloadUrl -like "*getAction*"
-                                   
-                    $isProxyUrl = $downloadUrl -like "*proxyservice.ediscovery*" -or 
-                    $downloadUrl -like "*exportaedblobFileResult*"
+                    Write-Host "Using Save-M365ComplianceFile for download..." -ForegroundColor Yellow
+                    $downloaded = Save-M365ComplianceFile -DownloadUrl $downloadUrl -OutputFilePath $outputFilePath
                     
-                    if ($isPurviewUrl) {
-                        Write-Host "Detected Microsoft Purview URL. Using specialized handling..." -ForegroundColor Yellow
-                        $downloaded = ConvertTo-M365PurviewDownload -DownloadUrl $downloadUrl -OutputFilePath $outputFilePath
-                        if (-not $downloaded) {
-                            throw "Failed to download from Purview URL"
-                        }
+                    if (-not $downloaded -or -not $downloaded.Success) {
+                        throw "Failed to download file using Save-M365ComplianceFile"
                     }
-                    # Proxy URLs can be downloaded directly with our enhanced download function
-                    elseif ($isProxyUrl) {
-                        Write-Host "Detected Microsoft 365 Compliance Export URL. Using specialized download method..." -ForegroundColor Yellow
-                        $downloaded = Save-M365ComplianceFile -DownloadUrl $downloadUrl -OutputFilePath $outputFilePath
-                        if (-not $downloaded -or -not $downloaded.Success) {
-                            throw "Failed to download from Compliance Export URL"
-                        }
-                        
-                        # Validate the downloaded file
-                        if (-not (Test-Path -Path $outputFilePath)) {
-                            throw "Failed to download file. Output path not created."
-                        }
-                        
-                        $fileInfo = Get-Item -Path $outputFilePath
-                        if ($fileInfo.Length -eq 0) {
-                            throw "Downloaded file is empty (0 bytes)"
-                        }
-                        
-                        # Special case for Report files - they use .zip extension but aren't true ZIP files
-                        if ($outputFilePath -like "*Reports-*") {
-                            Write-LogEntry -LogName $logPath -LogEntryText "Microsoft 365 Report file successfully downloaded: $outputFilePath" -LogLevel "INFO"
-                            Write-Host "✅ Microsoft 365 Report file downloaded successfully: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
-                            Write-Host "Note: These Report files use .zip extension but are actually HTML/XML files." -ForegroundColor Yellow
-                            
-                            return @{
-                                Success      = $true
-                                FilePath     = $outputFilePath
-                                DownloadDate = Get-Date
-                                IsReport     = $true
-                            }
-                        }
-                        
-                        # Check if it's a ZIP file and validate it
-                        if ($outputFilePath.EndsWith('.zip')) {
-                            try {
-                                # Use the enhanced validation with retry logic
-                                if (Test-ValidZipFile -FilePath $outputFilePath -RetryOnFailure -MaxRetries 3 -RetryDelay 2) {
-                                    Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded and validated: $outputFilePath" -LogLevel "INFO"
-                                    Write-Host "✅ Download successful and ZIP file validated: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
-                                    
-                                    return @{
-                                        Success      = $true
-                                        FilePath     = $outputFilePath
-                                        DownloadDate = Get-Date
-                                        IsValidZip   = $true
-                                    }
-                                }
-                                else {
-                                    Write-LogEntry -LogName $logPath -LogEntryText "Downloaded file is not a valid ZIP file after multiple attempts: $outputFilePath" -LogLevel "ERROR"
-                                    Write-Host "❌ Downloaded file is not a valid ZIP file after validation attempts." -ForegroundColor Red
-                                    
-                                    return @{
-                                        Success    = $false
-                                        FilePath   = $outputFilePath
-                                        Error      = "Downloaded file is not a valid ZIP file"
-                                        IsValidZip = $false
-                                    }
-                                }
-                            }
-                            catch {
-                                Write-LogEntry -LogName $logPath -LogEntryText "Error validating ZIP file: $_" -LogLevel "ERROR"
-                                Write-Host "Error validating ZIP file: $_" -ForegroundColor Red
-                                return @{
-                                    Success = $false
-                                    Error   = "Error validating ZIP file: $_"
-                                }
-                            }
-                        }
-                        
-                        # Regular file (not Report or ZIP)
-                        Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded: $outputFilePath" -LogLevel "INFO"
-                        Write-Host "✅ Download successful: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
+                    
+                    $fileInfo = Get-Item -Path $outputFilePath
+                    
+                    # Special case for Report files - they use .zip extension but aren't true ZIP files
+                    if ($outputFilePath -like "*Reports-*") {
+                        Write-LogEntry -LogName $logPath -LogEntryText "Microsoft 365 Report file successfully downloaded: $outputFilePath" -LogLevel "INFO"
+                        Write-Host "✅ Microsoft 365 Report file downloaded successfully: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
+                        Write-Host "Note: These Report files use .zip extension but are actually HTML/XML files." -ForegroundColor Yellow
                         
                         return @{
                             Success      = $true
                             FilePath     = $outputFilePath
                             DownloadDate = Get-Date
+                            IsReport     = $true
                         }
                     }
-                    else {
-                        # Standard download method for non-M365 exports
-                        # Get auth token headers for binary content
-                        $headers = @{
-                            "Accept" = "application/octet-stream"
-                        }
-                        
-                        Write-Host "Starting standard binary download..." -ForegroundColor Yellow
-                        
-                        # Try multiple download methods in sequence
-                        $downloadSuccess = $false
-                        $downloadError = ""
-                        
+                    
+                    # Check if it's a ZIP file and validate it
+                    if ($outputFilePath.EndsWith('.zip')) {
                         try {
-                            # Method 1: WebClient
-                            try {
-                                $webClient = New-Object System.Net.WebClient
-                                foreach ($key in $headers.Keys) {
-                                    $webClient.Headers.Add($key, $headers[$key])
-                                }
-                                
-                                $ProgressPreference = 'SilentlyContinue'
-                                $webClient.DownloadFile($downloadUrl, $outputFilePath)
-                                $ProgressPreference = 'Continue'
-                                $downloadSuccess = $true
-                            }
-                            catch {
-                                $downloadError = "WebClient: $_"
-                                Write-Host "WebClient download failed: $_" -ForegroundColor Yellow
-                            }
-                            
-                            # Method 2: BITS Transfer (if WebClient failed)
-                            if (-not $downloadSuccess) {
-                                try {
-                                    if (Get-Module -ListAvailable -Name BitsTransfer) {
-                                        Import-Module BitsTransfer
-                                        Start-BitsTransfer -Source $downloadUrl -Destination $outputFilePath -DisplayName "Downloading export" -Priority High
-                                        $downloadSuccess = $true
-                                    }
-                                }
-                                catch {
-                                    $downloadError += "`nBITS: $_"
-                                    Write-Host "BITS Transfer download failed: $_" -ForegroundColor Yellow
-                                }
-                            }
-                            
-                            # Method 3: Invoke-WebRequest (if others failed)
-                            if (-not $downloadSuccess) {
-                                try {
-                                    $ProgressPreference = 'SilentlyContinue'
-                                    Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $outputFilePath -Method Get -UseBasicParsing
-                                    $ProgressPreference = 'Continue'
-                                    $downloadSuccess = $true
-                                }
-                                catch {
-                                    $downloadError += "`nInvoke-WebRequest: $_"
-                                    Write-Host "Invoke-WebRequest download failed: $_" -ForegroundColor Red
-                                    throw "All download methods failed: $downloadError"
-                                }
-                            }
-                            
-                            if (-not $downloadSuccess) {
-                                throw "Download failed with all available methods: $downloadError"
-                            }
-                        }
-                        catch {
-                            # Clean up any partial downloads before re-throwing the error
-                            if (Test-Path -Path $outputFilePath) {
-                                Remove-Item -Path $outputFilePath -Force
-                            }
-                            throw # Re-throw to be caught by the outer catch block
-                        }
-                        
-                        try {
-                            # First validate file exists
-                            if (-not (Test-Path -Path $outputFilePath)) {
-                                throw "Failed to download file. Output path not created."
-                            }
-                            
-                            # Then check file size
-                            $fileInfo = Get-Item -Path $outputFilePath
-                            if ($fileInfo.Length -eq 0) {
-                                throw "Downloaded file is empty (0 bytes)"
-                            }
-                            
-                            # Special case for Report files - they use .zip extension but aren't true ZIP files
-                            if ($outputFilePath -like "*Reports-*") {
-                                Write-LogEntry -LogName $logPath -LogEntryText "Microsoft 365 Report file successfully downloaded: $outputFilePath" -LogLevel "INFO"
-                                Write-Host "? Microsoft 365 Report file downloaded successfully: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
-                                Write-Host "Note: These Report files use .zip extension but are actually HTML/XML files." -ForegroundColor Yellow
+                            # Use the enhanced validation with retry logic
+                            if (Test-ValidZipFile -FilePath $outputFilePath -RetryOnFailure -MaxRetries 3 -RetryDelay 2) {
+                                Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded and validated: $outputFilePath" -LogLevel "INFO"
+                                Write-Host "✅ Download successful and ZIP file validated: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
                                 
                                 return @{
                                     Success      = $true
                                     FilePath     = $outputFilePath
                                     DownloadDate = Get-Date
-                                    IsReport     = $true
+                                    IsValidZip   = $true
                                 }
                             }
-                            
-                            # Check if it's a ZIP file and validate it
-                            if ($outputFilePath.EndsWith('.zip')) {
-                                try {
-                                    # Use the enhanced validation with retry logic
-                                    if (Test-ValidZipFile -FilePath $outputFilePath -RetryOnFailure -MaxRetries 3 -RetryDelay 2) {
-                                        Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded and validated: $outputFilePath" -LogLevel "INFO"
-                                        Write-Host "? Download successful and ZIP file validated: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
-                                        
-                                        return @{
-                                            Success      = $true
-                                            FilePath     = $outputFilePath
-                                            DownloadDate = Get-Date
-                                            IsValidZip   = $true
-                                        }
-                                    }
-                                    else {
-                                        Write-LogEntry -LogName $logPath -LogEntryText "Downloaded file is not a valid ZIP file after multiple attempts: $outputFilePath" -LogLevel "ERROR"
-                                        Write-Host "?? Downloaded file is not a valid ZIP file after validation attempts." -ForegroundColor Red
-                                        
-                                        return @{
-                                            Success    = $false
-                                            FilePath   = $outputFilePath
-                                            Error      = "Downloaded file is not a valid ZIP file"
-                                            IsValidZip = $false
-                                        }
-                                    }
+                            else {
+                                Write-LogEntry -LogName $logPath -LogEntryText "Downloaded file is not a valid ZIP file after multiple attempts: $outputFilePath" -LogLevel "ERROR"
+                                Write-Host "❌ Downloaded file is not a valid ZIP file after validation attempts." -ForegroundColor Red
+                                
+                                return @{
+                                    Success    = $false
+                                    FilePath   = $outputFilePath
+                                    Error      = "Downloaded file is not a valid ZIP file"
+                                    IsValidZip = $false
                                 }
-                                catch {
-                                    Write-LogEntry -LogName $logPath -LogEntryText "Error validating ZIP file: $_" -LogLevel "ERROR"
-                                    Write-Host "Error validating ZIP file: $_" -ForegroundColor Red
-                                    return @{
-                                        Success = $false
-                                        Error   = "Error validating ZIP file: $_"
-                                    }
-                                }
-                            }
-                            
-                            # Regular file (not Report or ZIP)
-                            Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded: $outputFilePath" -LogLevel "INFO"
-                            Write-Host "? Download successful: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
-                            
-                            return @{
-                                Success      = $true
-                                FilePath     = $outputFilePath
-                                DownloadDate = Get-Date
                             }
                         }
                         catch {
-                            Write-LogEntry -LogName $logPath -LogEntryText "Error validating download: $_" -LogLevel "ERROR"
-                            Write-Host "?? Error validating download: $_" -ForegroundColor Red
-                            
-                            # Clean up if needed
-                            if (Test-Path -Path $outputFilePath) {
-                                Remove-Item -Path $outputFilePath -Force
-                            }
-                            
+                            Write-LogEntry -LogName $logPath -LogEntryText "Error validating ZIP file: $_" -LogLevel "ERROR"
+                            Write-Host "Error validating ZIP file: $_" -ForegroundColor Red
                             return @{
                                 Success = $false
-                                Error   = "$_"
+                                Error   = "Error validating ZIP file: $_"
                             }
                         }
                     }
-                    catch {
-                        Write-LogEntry -LogName $logPath -LogEntryText "Failed to download file: $_" -LogLevel "ERROR"
-                        Write-Host "?? Download operation failed: $_" -ForegroundColor Red
-                        
-                        # Delete any partial downloads
-                        if (Test-Path -Path $outputFilePath) {
-                            Remove-Item -Path $outputFilePath -Force
-                        }
-                        return @{
-                            Success = $false
-                            Error   = "Download operation failed: $_"
-                        }
+                    
+                    # Regular file (not Report or ZIP)
+                    Write-LogEntry -LogName $logPath -LogEntryText "File successfully downloaded: $outputFilePath" -LogLevel "INFO"
+                    Write-Host "✅ Download successful: $([math]::Round($fileInfo.Length / 1KB, 2)) KB" -ForegroundColor Green
+                    
+                    return @{
+                        Success      = $true
+                        FilePath     = $outputFilePath
+                        DownloadDate = Get-Date
                     }
                 }
                 catch {
-                    Write-LogEntry -LogName $logPath -LogEntryText "Error in download process: $_" -LogLevel "ERROR"
-                    Write-Host "Error in download process: $_" -ForegroundColor Red
-                    
+                    Write-LogEntry -LogName $logPath -LogEntryText "Failed to download file: $_" -LogLevel "ERROR"
+                    Write-Host "?? Download operation failed: $_" -ForegroundColor Red
+                        
+                    # Delete any partial downloads
+                    if (Test-Path -Path $outputFilePath) {
+                        Remove-Item -Path $outputFilePath -Force
+                    }
                     return @{
                         Success = $false
-                        Error   = "Download process error: $_"
+                        Error   = "Download operation failed: $_"
                     }
                 }
             }
-            else {
-                Write-LogEntry -LogName $logPath -LogEntryText "Export is not ready for download. Current status: $($exportStatus.Status)" -LogLevel "WARNING"
-                Write-Host "Export is not ready for download. Current status: $($exportStatus.Status)" -ForegroundColor Yellow
-    
+            catch {
+                Write-LogEntry -LogName $logPath -LogEntryText "Error in download process: $_" -LogLevel "ERROR"
+                Write-Host "Error in download process: $_" -ForegroundColor Red
+                    
                 return @{
                     Success = $false
-                    Status  = $exportStatus.Status
-                    Error   = "Export is not ready for download. Current status: $($exportStatus.Status)"
+                    Error   = "Download process error: $_"
                 }
+            }
+        }
+        else {
+            Write-LogEntry -LogName $logPath -LogEntryText "Export is not ready for download. Current status: $($exportStatus.Status)" -LogLevel "WARNING"
+            Write-Host "Export is not ready for download. Current status: $($exportStatus.Status)" -ForegroundColor Yellow
+    
+            return @{
+                Success = $false
+                Status  = $exportStatus.Status
+                Error   = "Export is not ready for download. Current status: $($exportStatus.Status)"
             }
         }
     }
@@ -3560,76 +2957,21 @@ if ($Operation -eq "menu" -and -not $CaseId -and -not $SearchId -and -not $Expor
                                         Write-Host "Downloading $fileName to $outputFilePath..." -ForegroundColor Yellow
                                         
                                         try {
-                                            Write-Host "Attempting specialized M365 Compliance download..." -ForegroundColor Yellow
-                                            
-                                            # Check the URL patterns to determine the right download method
-                                            $isPurviewUrl = $attachments[$index].downloadUrl -like "*purview*" -or 
-                                            $attachments[$index].downloadUrl -like "*purviewcases*" -or
-                                            $attachments[$index].downloadUrl -like "*getAction*"
-                                   
-                                            $isProxyUrl = $attachments[$index].downloadUrl -like "*proxyservice.ediscovery*" -or 
-                                            $attachments[$index].downloadUrl -like "*exportaedblobFileResult*"
-                                            
-                                            $downloadSuccess = $false
-                                            
-                                            # Purview URLs need special handling to extract the real download URL
-                                            if ($isPurviewUrl) {
-                                                Write-Host "Detected Microsoft Purview URL. Using specialized handling..." -ForegroundColor Yellow
-                                                $downloadSuccess = ConvertTo-M365PurviewDownload -DownloadUrl $attachments[$index].downloadUrl -OutputFilePath $outputFilePath
-                                            }
-                                            # Proxy URLs can be downloaded directly with our enhanced download function
-                                            elseif ($isProxyUrl) {
-                                                Write-Host "Detected Microsoft 365 Compliance Export URL. Using specialized download method..." -ForegroundColor Yellow
-                                                $downloadSuccess = Save-M365ComplianceFile -DownloadUrl $attachments[$index].downloadUrl -OutputFilePath $outputFilePath
+                                            Write-Host "Using Save-M365ComplianceFile for download..." -ForegroundColor Yellow
+                            
+                                            # Use only Save-M365ComplianceFile for all downloads
+                                            $downloadResult = Save-M365ComplianceFile -DownloadUrl $attachments[$index].downloadUrl -OutputFilePath $outputFilePath
+                            
+                                            if ($downloadResult -and $downloadResult.Success) {
+                                                Write-Host "✅ Download completed successfully." -ForegroundColor Green
+                                                Write-Host "File saved to: $outputFilePath" -ForegroundColor Cyan
                                             }
                                             else {
-                                                # Standard download method for non-M365 exports
-                                                # Get auth token headers for binary content
-                                                $headers = @{
-                                                    "Accept" = "application/octet-stream"
-                                                }
-                                                
-                                                Write-Host "Starting standard binary download..." -ForegroundColor Yellow
-                                                
-                                                # Try multiple methods in sequence
-                                                try {
-                                                    # Method 1: WebClient
-                                                    $webClient = New-Object System.Net.WebClient
-                                                    foreach ($key in $headers.Keys) {
-                                                        $webClient.Headers.Add($key, $headers[$key])
-                                                    }
-                                                    
-                                                    $ProgressPreference = 'SilentlyContinue'
-                                                    $webClient.DownloadFile($attachments[$index].downloadUrl, $outputFilePath)
-                                                    $ProgressPreference = 'Continue'
-                                                    $downloadSuccess = $true
-                                                }
-                                                catch {
-                                                    Write-Host "WebClient download failed: $_" -ForegroundColor Yellow
-                                                    
-                                                    # Method 2: BITS Transfer
-                                                    try {
-                                                        if (Get-Module -ListAvailable -Name BitsTransfer) {
-                                                            Import-Module BitsTransfer
-                                                            Start-BitsTransfer -Source $attachments[$index].downloadUrl -Destination $outputFilePath -DisplayName "Downloading attachment" -Priority High
-                                                            $downloadSuccess = $true
-                                                        }
-                                                        else {
-                                                            # Method 3: Invoke-WebRequest
-                                                            $ProgressPreference = 'SilentlyContinue'
-                                                            Invoke-WebRequest -Uri $attachments[$index].downloadUrl -Headers $headers -OutFile $outputFilePath -Method Get -UseBasicParsing
-                                                            $ProgressPreference = 'Continue'
-                                                            $downloadSuccess = $true
-                                                        }
-                                                    }
-                                                    catch {
-                                                        Write-Host "All download methods failed: $_" -ForegroundColor Red
-                                                        $downloadSuccess = $false
-                                                    }
+                                                Write-Host "❌ Download failed." -ForegroundColor Red
+                                                if ($downloadResult -and $downloadResult.Error) {
+                                                    Write-Host "Error: $($downloadResult.Error)" -ForegroundColor Red
                                                 }
                                             }
-                                            
-                                            # Validate the downloaded file
                                             if (Test-Path -Path $outputFilePath) {
                                                 $fileInfo = Get-Item -Path $outputFilePath
                                                 if ($fileInfo.Length -gt 0) {
