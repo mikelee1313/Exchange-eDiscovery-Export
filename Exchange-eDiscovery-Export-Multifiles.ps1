@@ -97,7 +97,7 @@
     - App registration must have MicrosoftPurviewEDiscovery API permissions for downloads
 
 Author: Mike Lee | Dempsey Dunkin | Ranjit Sharma
-Date: 9/18/2025
+Date: 12/11/2025
 
 
 .REQUIREMENTS
